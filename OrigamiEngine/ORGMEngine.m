@@ -158,7 +158,13 @@
             }
             [_converter reinitWithNewInput:_input withDataFlush:flush];
             [_output seek:0.0]; //to reset amount played
-            [self setCurrentState:ORGMEngineStatePlaying]; //trigger delegate method
+            // If we're paused, don't set the new state otherwise the game could get
+            // to a state where it doesn't play anything because internally it's paused
+            // but the state is set to be playing, so a call to resume doesn't do anything.
+            // PTDIOS-1788
+            if(self.currentState != ORGMEngineStatePaused) {
+                [self setCurrentState:ORGMEngineStatePlaying]; //trigger delegate method
+            }
         });
     }
 }
