@@ -66,9 +66,10 @@
 
 - (BOOL)setupWithOutputUnit:(ORGMOutputUnit *)outputUnit {
     self.outputUnit = outputUnit;
+    [_outputUnit setSampleRate:_inputFormat.mSampleRate];
+    
     _outputFormat = outputUnit.format;
-    callbackBuffer =
-    malloc((CHUNK_SIZE/_outputFormat.mBytesPerFrame) * _inputFormat.mBytesPerPacket);
+    callbackBuffer = malloc((CHUNK_SIZE/_outputFormat.mBytesPerFrame) * _inputFormat.mBytesPerPacket);
     
     OSStatus stat = AudioConverterNew(&_inputFormat, &_outputFormat, &_converter);
     if (stat != noErr) {
@@ -104,7 +105,11 @@
         });
     } while (amountConverted > 0);
     
-    if (_convertedData.length >= BUFFER_SIZE && !_outputUnit.isProcessing) {
+    if (!_outputUnit.isProcessing) {
+        if (_convertedData.length < BUFFER_SIZE) {
+            dispatch_source_merge_data([ORGMQueues buffering_source], 1);
+            return;
+        }
         [_outputUnit process];
     }
 }
@@ -118,6 +123,21 @@
     self.inputUnit = inputUnit;
     _inputFormat = inputUnit.format;
     [self setupWithOutputUnit:_outputUnit];
+}
+
+- (int)shiftBytes:(NSUInteger)amount buffer:(void *)buffer {
+    int bytesToRead = MIN(_convertedData.length, amount);
+    
+    dispatch_sync([ORGMQueues lock_queue], ^{
+        memcpy(buffer, _convertedData.bytes, bytesToRead);
+        [_convertedData replaceBytesInRange:NSMakeRange(0, bytesToRead) withBytes:NULL length:0];
+    });
+    
+    return bytesToRead;
+}
+
+- (BOOL)isReadyForBuffering {
+    return (_convertedData.length <= 0.5*BUFFER_SIZE && !_inputUnit.isProcessing);
 }
 
 #pragma mark - private
@@ -150,18 +170,9 @@ static OSStatus ACInputProc(AudioConverterRef inAudioConverter,
 	OSStatus err = noErr;
 	int amountToWrite;
 	
-	amountToWrite = (*ioNumberDataPackets)*(converter->_inputFormat.mBytesPerPacket);
+    amountToWrite = [converter.inputUnit shiftBytes:(*ioNumberDataPackets)*(converter->_inputFormat.mBytesPerPacket)
+                                             buffer:converter->callbackBuffer];
     
-    NSMutableData *_data = converter.inputUnit.data;
-    if (_data.length < amountToWrite) {
-        amountToWrite = _data.length;
-    }
-
-    dispatch_sync([ORGMQueues lock_queue], ^{
-        memcpy(converter->callbackBuffer, _data.bytes, amountToWrite);
-        [_data replaceBytesInRange:NSMakeRange(0, amountToWrite) withBytes:NULL length:0];
-    });
-
 	if (amountToWrite == 0) {
 		ioData->mBuffers[0].mDataByteSize = 0;
 		*ioNumberDataPackets = 0;

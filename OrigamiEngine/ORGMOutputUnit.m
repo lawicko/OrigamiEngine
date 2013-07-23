@@ -28,7 +28,6 @@
 @interface ORGMOutputUnit () {
     AudioUnit outputUnit;
 	AURenderCallbackStruct renderCallback;
-	AudioStreamBasicDescription deviceFormat;
     
     AudioStreamBasicDescription _format;
     unsigned long long _amountPlayed;
@@ -103,6 +102,25 @@
 	AudioUnitSetParameter(outputUnit, kHALOutputParam_Volume, kAudioUnitScope_Global, 0, volume * 0.01f, 0);
 }
 
+- (void)setSampleRate:(double)sampleRate {
+	UInt32 size = sizeof(AudioStreamBasicDescription);
+    _format.mSampleRate = sampleRate;
+	AudioUnitSetProperty(outputUnit,
+                         kAudioUnitProperty_StreamFormat,
+                         kAudioUnitScope_Output,
+                         0,
+                         &_format,
+                         size);
+    
+	AudioUnitSetProperty(outputUnit,
+                         kAudioUnitProperty_StreamFormat,
+                         kAudioUnitScope_Input,
+                         0,
+                         &_format,
+                         size);
+	[self setFormat:&_format];
+}
+
 #pragma mark - callbacks
 static OSStatus Sound_Renderer(void *inRefCon,
                                AudioUnitRenderActionFlags *ioActionFlags,
@@ -116,7 +134,7 @@ static OSStatus Sound_Renderer(void *inRefCon,
 	
 	int amountToRead, amountRead;
 	
-	amountToRead = inNumberFrames * (output->deviceFormat.mBytesPerPacket);
+	amountToRead = inNumberFrames * (output->_format.mBytesPerPacket);
 	amountRead = [output readData:(readPointer) amount:amountToRead];
     
 	if (amountRead < amountToRead) {
@@ -126,7 +144,7 @@ static OSStatus Sound_Renderer(void *inRefCon,
 	}
 	
 	ioData->mBuffers[0].mDataByteSize = amountRead;
-	ioData->mBuffers[0].mNumberChannels = output->deviceFormat.mChannelsPerFrame;
+	ioData->mBuffers[0].mNumberChannels = output->_format.mChannelsPerFrame;
 	ioData->mNumberBuffers = 1;
 	
 	return err;
@@ -162,6 +180,7 @@ static OSStatus Sound_Renderer(void *inRefCon,
 	if (AudioUnitInitialize(outputUnit) != noErr)
 		return NO;
 	
+    AudioStreamBasicDescription deviceFormat;
 	UInt32 size = sizeof(AudioStreamBasicDescription);
 	Boolean outWritable;
 	AudioUnitGetPropertyInfo(outputUnit,
@@ -185,10 +204,14 @@ static OSStatus Sound_Renderer(void *inRefCon,
 	deviceFormat.mFormatFlags &= ~kLinearPCMFormatFlagIsNonInterleaved;
     deviceFormat.mFormatFlags &= ~kLinearPCMFormatFlagIsFloat;
     deviceFormat.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger;
-	deviceFormat.mBytesPerFrame =
-        deviceFormat.mChannelsPerFrame*(deviceFormat.mBitsPerChannel/8);
-	deviceFormat.mBytesPerPacket =
-        deviceFormat.mBytesPerFrame * deviceFormat.mFramesPerPacket;
+	deviceFormat.mBytesPerFrame = deviceFormat.mChannelsPerFrame*(deviceFormat.mBitsPerChannel/8);
+	deviceFormat.mBytesPerPacket = deviceFormat.mBytesPerFrame * deviceFormat.mFramesPerPacket;
+    
+    if (_outputFormat == ORGMOutputFormat24bit) {
+        deviceFormat.mBytesPerFrame = 6;
+        deviceFormat.mBytesPerPacket = 6;
+        deviceFormat.mBitsPerChannel = 24;
+    }
 	
 	AudioUnitSetProperty (outputUnit,
                           kAudioUnitProperty_StreamFormat,
@@ -220,24 +243,14 @@ static OSStatus Sound_Renderer(void *inRefCon,
                                        reason:NSLocalizedString(@"Converter is undefined", nil)
                                      userInfo:nil];
     }
-    int n;
-    n = amount;
-    NSMutableData *convertedData = _converter.convertedData;
-    if (convertedData.length < n) {
-        n = convertedData.length;
-    }
+    int bytesRead = [_converter shiftBytes:amount buffer:ptr];
+    _amountPlayed += bytesRead;
     
-    dispatch_sync([ORGMQueues lock_queue], ^{
-        memcpy(ptr, convertedData.bytes, n);
-        [convertedData replaceBytesInRange:NSMakeRange(0, n) withBytes:NULL length:0];
-    });
-    _amountPlayed += n;
-    
-    if (convertedData.length <= 0.5*BUFFER_SIZE && !_converter.inputUnit.isProcessing) {
+    if ([_converter isReadyForBuffering]) {
         dispatch_source_merge_data([ORGMQueues buffering_source], 1);
     }
     
-    return n;
+    return bytesRead;
 }
 
 - (void)setFormat:(AudioStreamBasicDescription *)f {
